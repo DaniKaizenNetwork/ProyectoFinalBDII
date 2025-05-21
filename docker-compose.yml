@@ -1,0 +1,32 @@
+
+
+services:
+  myDB:
+    image: postgres:17.2
+    container_name: votacion_db
+    restart: always
+    ports:
+      - 5434:5432
+    environment:
+      - POSTGRES_USER= adminDaniela
+      - POSTGRES_PASSWORD=candado/silla/mostaza
+      - POSTGRES_DB=votacion
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+  
+  pdAdmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin5
+    restart: always
+    depends_on:
+      - myDB
+    ports:
+      - 8089:80
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@votacion.com
+      - PGADMIN_DEFAULT_PASSWORD=candado/silla/mostaza
+    volumes:
+      - ./pgadmin:/var/lib/pgadmin
+      - ./pgadmin:/certs/server.cert
+      - ./pgadmin:/certs/server.key
+      - ./pgadmin:/pgadmin4/servers.json
