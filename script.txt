@@ -1,0 +1,856 @@
+-- Habilitar la extensión pgcrypto para cifrado de contraseñas y UUIDs aleatorios
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- Establecer el usuario de la aplicación para fines de auditoría en triggers
+-- Este valor debe ser establecido por la aplicación antes de cualquier operación que active un trigger.
+-- Ejemplo en la aplicación: SET app.user = <id_usuario_actual>;
+ALTER DATABASE votacion SET app.user = '0'; -- Valor por defecto, se sobrescribe por la aplicación
+
+-- Tabla: TiposEleccion
+-- Almacena los diferentes tipos de elecciones (ej: Presidencial, Parlamentaria, Municipal)
+CREATE TABLE TiposEleccion (
+    id_tipo_eleccion SERIAL PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL UNIQUE
+);
+
+-- Tabla: Elecciones
+-- Contiene la información general de cada evento electoral
+CREATE TABLE Elecciones (
+    id_eleccion SERIAL PRIMARY KEY,
+    nombre VARCHAR(200) NOT NULL,
+    descripcion TEXT,
+    fecha_inicio DATE NOT NULL,
+    fecha_fin DATE NOT NULL,
+    id_tipo_eleccion INT REFERENCES TiposEleccion(id_tipo_eleccion)
+);
+
+-- Tabla: PartidosPoliticos
+-- Almacena los datos de los partidos políticos participantes
+CREATE TABLE PartidosPoliticos (
+    id_partido SERIAL PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL UNIQUE,
+    siglas VARCHAR(10),
+    fecha_fundacion DATE
+);
+
+-- Tabla: Candidatos
+-- Lista de candidatos que participan en cada elección
+CREATE TABLE Candidatos (
+    id_candidato SERIAL PRIMARY KEY,
+    nombre_completo VARCHAR(150) NOT NULL,
+    id_partido INT REFERENCES PartidosPoliticos(id_partido),
+    id_eleccion INT REFERENCES Elecciones(id_eleccion),
+    numero_lista INT NOT NULL
+);
+
+-- Tabla: Votantes
+-- Registro de todos los votantes elegibles
+CREATE TABLE Votantes (
+    id_votante SERIAL PRIMARY KEY,
+    dni VARCHAR(15) UNIQUE NOT NULL,
+    nombre_completo VARCHAR(150) NOT NULL,
+    fecha_nacimiento DATE NOT NULL
+);
+
+-- Tabla: PadronElectoral
+-- Asocia a los votantes con las elecciones en las que están habilitados para votar
+CREATE TABLE PadronElectoral (
+    id_padron SERIAL PRIMARY KEY,
+    id_votante INT REFERENCES Votantes(id_votante),
+    id_eleccion INT REFERENCES Elecciones(id_eleccion),
+    habilitado BOOLEAN DEFAULT TRUE, -- TRUE si puede votar, FALSE si ya votó o está inhabilitado
+    UNIQUE(id_votante, id_eleccion) -- Un votante solo puede aparecer una vez por elección en el padrón
+);
+
+-- Tabla: CentrosVotacion
+-- Ubicaciones físicas donde se instalan las mesas de votación
+CREATE TABLE CentrosVotacion (
+    id_centro SERIAL PRIMARY KEY,
+    nombre VARCHAR(150) NOT NULL,
+    direccion VARCHAR(255)
+);
+
+-- Tabla: MesasElectorales
+-- Mesas individuales dentro de los centros de votación
+CREATE TABLE MesasElectorales (
+    id_mesa SERIAL PRIMARY KEY,
+    numero_mesa INT NOT NULL,
+    id_centro INT REFERENCES CentrosVotacion(id_centro),
+    UNIQUE(numero_mesa, id_centro) -- Una mesa es única por su número dentro de un centro
+);
+
+-- Tabla: VotosEmitidos
+-- Registra cada voto individual. El voto es anonimizado (no se vincula directamente al votante).
+CREATE TABLE VotosEmitidos (
+    id_voto UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- ID único y aleatorio para cada voto
+    id_eleccion INT REFERENCES Elecciones(id_eleccion),
+    id_candidato INT REFERENCES Candidatos(id_candidato),
+    id_mesa INT REFERENCES MesasElectorales(id_mesa),
+    fecha_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabla: ResultadosMesa
+-- Almacena el conteo de votos por candidato a nivel de mesa
+CREATE TABLE ResultadosMesa (
+    id_resultado_mesa SERIAL PRIMARY KEY,
+    id_mesa INT REFERENCES MesasElectorales(id_mesa),
+    id_candidato INT REFERENCES Candidatos(id_candidato),
+    votos INT DEFAULT 0,
+    CONSTRAINT uq_resultadosmesa UNIQUE (id_mesa, id_candidato) -- Un candidato solo tiene un conteo por mesa
+);
+
+-- Tabla: ResultadosCentro
+-- Almacena el conteo de votos por candidato a nivel de centro de votación
+CREATE TABLE ResultadosCentro (
+    id_resultado_centro SERIAL PRIMARY KEY,
+    id_centro INT REFERENCES CentrosVotacion(id_centro),
+    id_candidato INT REFERENCES Candidatos(id_candidato),
+    votos INT DEFAULT 0,
+    CONSTRAINT uq_resultadoscentro UNIQUE (id_centro, id_candidato) -- Un candidato solo tiene un conteo por centro
+);
+
+-- Tabla: ResultadosGenerales
+-- Almacena el conteo total de votos por candidato a nivel de elección
+CREATE TABLE ResultadosGenerales (
+    id_resultado_general SERIAL PRIMARY KEY,
+    id_eleccion INT REFERENCES Elecciones(id_eleccion),
+    id_candidato INT REFERENCES Candidatos(id_candidato),
+    votos INT DEFAULT 0,
+    CONSTRAINT uq_resultadosgenerales UNIQUE (id_eleccion, id_candidato) -- Un candidato solo tiene un conteo general por elección
+);
+
+-- Tabla: Auditores
+-- Lista de personas con rol de auditor
+CREATE TABLE Auditores (
+    id_auditor SERIAL PRIMARY KEY,
+    nombre_completo VARCHAR(150),
+    correo VARCHAR(100),
+    activo BOOLEAN DEFAULT TRUE
+);
+
+-- Tabla: UsuariosSistema
+-- Usuarios del sistema con roles y contraseñas cifradas
+CREATE TABLE UsuariosSistema (
+    id_usuario SERIAL PRIMARY KEY,
+    usuario VARCHAR(50) UNIQUE NOT NULL,
+    rol VARCHAR(50) CHECK (rol IN ('admin', 'oficial', 'auditor', 'observador')),
+    hash_password TEXT NOT NULL,
+    activo BOOLEAN DEFAULT TRUE
+);
+
+-- Tabla: LogsSistema
+-- Registra eventos importantes del sistema para auditoría
+CREATE TABLE LogsSistema (
+    id_log SERIAL PRIMARY KEY,
+    id_usuario INT REFERENCES UsuariosSistema(id_usuario),
+    fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    accion TEXT,
+    detalle TEXT
+);
+
+-- Datos para TiposEleccion
+INSERT INTO TiposEleccion(nombre) VALUES
+('Presidencial'),
+('Parlamentaria'),
+('Municipal'),
+('Regional'),
+('Referéndum');
+
+-- Datos para Elecciones
+INSERT INTO Elecciones(nombre, descripcion, fecha_inicio, fecha_fin, id_tipo_eleccion)
+VALUES
+('Elección Presidencial 2025', 'Elección para la Presidencia de la República', '2025-05-01', '2025-05-02', 1),
+('Elección Parlamentaria 2025', 'Elección de miembros del parlamento', '2025-05-01', '2025-05-02', 2),
+('Elección Municipal Bogotá 2026', 'Elección de alcalde y concejales de Bogotá', '2026-10-27', '2026-10-27', 3),
+('Elección Regional Antioquia 2026', 'Elección de gobernador y diputados de Antioquia', '2026-10-27', '2026-10-27', 4),
+('Referéndum Nacional 2024', 'Consulta popular sobre un tema específico', '2024-08-15', '2024-08-15', 5);
+
+-- Datos para PartidosPoliticos
+INSERT INTO PartidosPoliticos(nombre, siglas, fecha_fundacion)
+VALUES
+('Partido Democrático', 'PD', '1990-01-01'),
+('Partido Progresista', 'PP', '2000-06-15'),
+('Unión Cívica', 'UC', '1985-03-20'),
+('Frente Ciudadano', 'FC', '2010-09-01'),
+('Movimiento Verde', 'MV', '2005-11-11');
+
+-- Datos para Candidatos
+INSERT INTO Candidatos(nombre_completo, id_partido, id_eleccion, numero_lista)
+VALUES
+('Juan Pérez', 1, 1, 101), -- Elección Presidencial 2025
+('Ana Gómez', 2, 1, 102),
+('Luis Rodríguez', 3, 1, 103),
+('Sofía Vargas', 1, 2, 201), -- Elección Parlamentaria 2025
+('Marco Torres', 4, 2, 202),
+('Laura Castro', 5, 3, 301), -- Elección Municipal Bogotá 2026
+('Andrés Herrera', 2, 3, 302),
+('Valeria Soto', 3, 4, 401), -- Elección Regional Antioquia 2026
+('Felipe Díaz', 4, 4, 402);
+
+-- Datos para Votantes
+INSERT INTO Votantes(dni, nombre_completo, fecha_nacimiento)
+VALUES
+('12345678A', 'Carlos Soto', '1980-04-20'),
+('87654321B', 'Lucía Ramírez', '1992-11-10'),
+('56781234C', 'Diego Torres', '1975-06-30'),
+('43218765D', 'María León', '2000-09-15'),
+('98761234E', 'Elena Vargas', '1985-03-01'),
+('11111111F', 'Javier Montoya', '1990-08-12'),
+('22222222G', 'Rosa Castillo', '1988-05-22'),
+('33333333H', 'Pedro Medina', '1979-01-10'),
+('44444444I', 'Laura Salcedo', '1995-07-14'),
+('55555555J', 'Esteban Ríos', '2001-02-20');
+
+-- Datos para PadronElectoral
+INSERT INTO PadronElectoral(id_votante, id_eleccion, habilitado)
+VALUES
+(1, 1, TRUE), (2, 1, TRUE), (3, 1, FALSE), (4, 1, TRUE), (5, 1, TRUE),
+(6, 1, TRUE), (7, 1, TRUE), (8, 1, TRUE), (9, 1, TRUE), (10, 1, TRUE),
+(1, 2, TRUE), (2, 2, TRUE), (3, 2, TRUE), (4, 2, FALSE), (5, 2, TRUE);
+
+-- Datos para CentrosVotacion
+INSERT INTO CentrosVotacion(nombre, direccion)
+VALUES
+('Centro Cívico 1', 'Calle Falsa 123'),
+('Centro Comunal 2', 'Av. Central 456'),
+('Escuela Pública 3', 'Carrera 7 # 8-9'),
+('Coliseo Deportivo 4', 'Diagonal 10 # 11-12'),
+('Universidad Nacional', 'Calle 26 # 30-40');
+
+-- Datos para MesasElectorales
+INSERT INTO MesasElectorales(numero_mesa, id_centro)
+VALUES
+(1, 1), (2, 1), (3, 1), (1, 2), (2, 2),
+(1, 3), (2, 3), (1, 4), (1, 5), (2, 5);
+
+
+-- Datos para UsuariosSistema
+INSERT INTO UsuariosSistema(usuario, rol, hash_password, activo)
+VALUES
+('admin1', 'admin', crypt('admin123', gen_salt('bf')), TRUE),
+('oficial1', 'oficial', crypt('mesa123', gen_salt('bf')), TRUE),
+('auditor1', 'auditor', crypt('audit123', gen_salt('bf')), TRUE),
+('observador1', 'observador', crypt('view123', gen_salt('bf')), TRUE),
+('admin2', 'admin', crypt('admin456', gen_salt('bf')), TRUE),
+('oficial2', 'oficial', crypt('mesa456', gen_salt('bf')), TRUE);
+
+-- Datos para Auditores
+INSERT INTO Auditores(nombre_completo, correo) VALUES
+('Camila Ortega', 'cortega@auditoria.org'),
+('Ricardo Palma', 'rpalma@auditoria.org'),
+('Sofía Betancourt', 'sbetan@auditoria.org'),
+('Juan David Ríos', 'jdrios@auditoria.org'),
+('Valeria Cárdenas', 'vcardenas@auditoria.org');
+
+-- Datos iniciales para LogsSistema (se llenarán más por triggers)
+INSERT INTO LogsSistema(id_usuario, accion, detalle) VALUES
+(1, 'Inserción de Elección', 'Elección Presidencial 2025 agregada al sistema'),
+(2, 'Registro de Voto', 'Voto simulado para Juan Pérez en Mesa 1'),
+(2, 'Registro de Voto', 'Voto simulado para Ana Gómez en Mesa 2'),
+(3, 'Auditoría', 'Verificación de votos en centro 1');
+
+
+-- **Simulación de Votos Emitidos**
+-- Estos votos activarán los triggers de actualización de resultados
+-- (El id_votante se maneja en el SP RegistrarVoto para inhabilitar en padrón, no aquí directamente)
+INSERT INTO VotosEmitidos(id_eleccion, id_candidato, id_mesa) VALUES
+(1, 1, 1), (1, 1, 1), (1, 2, 1), (1, 1, 2), (1, 2, 2), (1, 2, 2), (1, 1, 3), (1, 2, 3), (1, 2, 3), (1, 1, 3),
+(1, 1, 1), (1, 2, 1), (1, 1, 2), (1, 2, 2), (1, 1, 3); -- Más votos para generar datos variados
+
+
+-- Índices para buscar votantes en padrón
+CREATE INDEX idx_padron_votante_eleccion ON PadronElectoral (id_votante, id_eleccion);
+CREATE INDEX idx_padron_habilitado ON PadronElectoral (habilitado);
+
+-- Índices para candidatos por elección
+CREATE INDEX idx_candidatos_eleccion ON Candidatos (id_eleccion);
+CREATE INDEX idx_candidatos_partido ON Candidatos (id_partido);
+
+-- Índices para resultados por mesa (ya cubierto por UNIQUE en ResultadosMesa, pero se añade para claridad si se busca solo por mesa)
+CREATE INDEX idx_resultadosmesa_mesa ON ResultadosMesa (id_mesa);
+CREATE INDEX idx_resultadosmesa_candidato ON ResultadosMesa (id_candidato);
+
+-- Índice para búsquedas frecuentes en VotosEmitidos
+CREATE INDEX idx_votosemitidos_eleccion_candidato_mesa ON VotosEmitidos (id_eleccion, id_candidato, id_mesa);
+
+-- Índices para log de auditoría
+CREATE INDEX idx_logsistema_fecha ON LogsSistema (fecha);
+CREATE INDEX idx_logsistema_usuario ON LogsSistema (id_usuario);
+
+-- Índices adicionales para rendimiento
+CREATE INDEX idx_votantes_dni ON Votantes (dni);
+CREATE INDEX idx_elecciones_fechas ON Elecciones (fecha_inicio, fecha_fin);
+
+
+-- Vista: VotantesHabilitadosMesa
+-- Muestra los votantes habilitados y la mesa de votación asignada (simulada aquí).
+-- Nota: En un sistema real, PadronElectoral debería tener una columna 'id_mesa_asignada'
+-- para una asignación precisa. La lógica aquí es ilustrativa.
+CREATE OR REPLACE VIEW VotantesHabilitadosMesa AS
+SELECT
+    v.nombre_completo AS votante_nombre,
+    v.dni,
+    e.nombre AS eleccion_nombre,
+    me.numero_mesa,
+    cv.nombre AS centro_votacion_nombre
+FROM PadronElectoral pe
+JOIN Votantes v ON pe.id_votante = v.id_votante
+JOIN Elecciones e ON pe.id_eleccion = e.id_eleccion
+JOIN MesasElectorales me ON me.id_mesa = (
+    -- Lógica de asignación de mesa simplificada para demostración.
+    -- En un sistema real, esto sería un campo en PadronElectoral o una lógica más compleja.
+    CASE
+        WHEN pe.id_votante % 2 = 1 THEN 1 -- Asigna a mesa 1 (del centro 1)
+        ELSE 4 -- Asigna a mesa 1 (del centro 2)
+    END
+)
+JOIN CentrosVotacion cv ON me.id_centro = cv.id_centro
+WHERE pe.habilitado = TRUE;
+
+-- Vista: CandidatosPorEleccion
+-- Muestra los candidatos, sus partidos y las elecciones en las que participan
+CREATE OR REPLACE VIEW CandidatosPorEleccion AS
+SELECT
+    c.nombre_completo AS candidato_nombre,
+    p.nombre AS partido_nombre,
+    e.nombre AS eleccion_nombre
+FROM Candidatos c
+JOIN PartidosPoliticos p ON c.id_partido = p.id_partido
+JOIN Elecciones e ON c.id_eleccion = e.id_eleccion
+ORDER BY e.nombre, p.nombre, c.nombre_completo;
+
+-- Vista: ResultadosParcialesCentro
+-- Agrega los votos por candidato a nivel de centro de votación
+CREATE OR REPLACE VIEW ResultadosParcialesCentro AS
+SELECT
+    ce.nombre AS centro_votacion_nombre,
+    ca.nombre_completo AS candidato_nombre,
+    SUM(rm.votos) AS total_votos
+FROM ResultadosMesa rm
+JOIN MesasElectorales me ON rm.id_mesa = me.id_mesa
+JOIN CentrosVotacion ce ON me.id_centro = ce.id_centro
+JOIN Candidatos ca ON rm.id_candidato = ca.id_candidato
+GROUP BY ce.nombre, ca.nombre_completo
+ORDER BY ce.nombre, total_votos DESC;
+
+-- Vista: AuditoriaAccesos
+-- Proporciona un resumen de los accesos y acciones de los usuarios en el sistema
+CREATE OR REPLACE VIEW AuditoriaAccesos AS
+SELECT
+    l.fecha,
+    u.usuario,
+    u.rol,
+    l.accion,
+    l.detalle
+FROM LogsSistema l
+JOIN UsuariosSistema u ON l.id_usuario = u.id_usuario
+ORDER BY l.fecha DESC;
+
+-- Vista: ResultadosGeneralesView
+-- Muestra los resultados totales de votos por candidato a nivel de elección
+CREATE OR REPLACE VIEW ResultadosGeneralesView AS
+SELECT
+    e.nombre AS eleccion_nombre,
+    c.nombre_completo AS candidato_nombre,
+    SUM(rg.votos) AS total_votos
+FROM ResultadosGenerales rg
+JOIN Candidatos c ON rg.id_candidato = c.id_candidato
+JOIN Elecciones e ON rg.id_eleccion = e.id_eleccion
+GROUP BY e.nombre, c.nombre_completo
+ORDER BY e.nombre, total_votos DESC;
+
+
+-- Función: VerificarHabilitacion
+-- Verifica si un votante está habilitado para votar en una elección específica
+CREATE OR REPLACE FUNCTION VerificarHabilitacion(votante_id INT, eleccion_id INT) RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN EXISTS (
+        SELECT 1 FROM PadronElectoral
+        WHERE id_votante = votante_id AND id_eleccion = eleccion_id AND habilitado = TRUE
+    );
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función: ContarVotosCandidatoMesa
+-- Devuelve el número de votos para un candidato en una mesa específica
+CREATE OR REPLACE FUNCTION ContarVotosCandidatoMesa(p_candidato_id INT, p_mesa_id INT) RETURNS INT AS $$
+DECLARE
+    v_total_votos INT;
+BEGIN
+    SELECT votos INTO v_total_votos
+    FROM ResultadosMesa
+    WHERE id_candidato = p_candidato_id AND id_mesa = p_mesa_id;
+
+    RETURN COALESCE(v_total_votos, 0);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función: ObtenerEleccionesActivas
+-- Retorna todas las elecciones que están actualmente en curso
+CREATE OR REPLACE FUNCTION ObtenerEleccionesActivas() RETURNS SETOF Elecciones AS $$
+BEGIN
+    RETURN QUERY SELECT * FROM Elecciones WHERE CURRENT_DATE BETWEEN fecha_inicio AND fecha_fin;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función: ObtenerCandidatosPorEleccion
+-- Retorna todos los candidatos que participan en una elección dada
+CREATE OR REPLACE FUNCTION ObtenerCandidatosPorEleccion(p_id_eleccion INT) RETURNS SETOF Candidatos AS $$
+BEGIN
+    RETURN QUERY SELECT * FROM Candidatos WHERE id_eleccion = p_id_eleccion;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función: EdadVotante
+-- Calcula la edad actual de un votante dado su ID
+CREATE OR REPLACE FUNCTION EdadVotante(p_id_votante INT) RETURNS INT AS $$
+DECLARE
+    v_fecha_nacimiento DATE;
+BEGIN
+    SELECT fecha_nacimiento INTO v_fecha_nacimiento FROM Votantes WHERE id_votante = p_id_votante;
+    IF v_fecha_nacimiento IS NULL THEN
+        RETURN NULL;
+    END IF;
+    RETURN EXTRACT(YEAR FROM AGE(CURRENT_DATE, v_fecha_nacimiento));
+END;
+$$ LANGUAGE plpgsql;
+
+-- Función: BuscarVotantePorDNI
+-- Busca y retorna la información de un votante por su número de DNI
+CREATE OR REPLACE FUNCTION BuscarVotantePorDNI(p_dni VARCHAR(15)) RETURNS SETOF Votantes AS $$
+BEGIN
+    RETURN QUERY SELECT * FROM Votantes WHERE dni = p_dni;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Funciones para loguear inicio y fin de sesión (llamadas desde la aplicación)
+CREATE OR REPLACE FUNCTION LogLogin(p_usuario_id INT, p_rol VARCHAR(50)) RETURNS VOID AS $$
+BEGIN
+    INSERT INTO LogsSistema(id_usuario, accion, detalle)
+    VALUES (p_usuario_id, 'INICIO_SESION', 'Usuario ' || p_usuario_id || ' con rol ' || p_rol || ' ha iniciado sesión.');
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION LogLogout(p_usuario_id INT, p_rol VARCHAR(50)) RETURNS VOID AS $$
+BEGIN
+    INSERT INTO LogsSistema(id_usuario, accion, detalle)
+    VALUES (p_usuario_id, 'FIN_SESION', 'Usuario ' || p_usuario_id || ' con rol ' || p_rol || ' ha cerrado sesión.');
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- Procedimiento: CrearEleccion
+-- Crea un nuevo registro de elección
+CREATE OR REPLACE PROCEDURE CrearEleccion(
+    p_nombre VARCHAR(200),
+    p_descripcion TEXT,
+    p_fecha_inicio DATE,
+    p_fecha_fin DATE,
+    p_id_tipo_eleccion INT
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO Elecciones(nombre, descripcion, fecha_inicio, fecha_fin, id_tipo_eleccion)
+    VALUES (p_nombre, p_descripcion, p_fecha_inicio, p_fecha_fin, p_id_tipo_eleccion);
+    RAISE NOTICE 'Elección "%" creada exitosamente.', p_nombre;
+END;
+$$;
+
+-- Procedimiento: ActualizarEleccion
+-- Actualiza un registro existente de elección
+CREATE OR REPLACE PROCEDURE ActualizarEleccion(
+    p_id_eleccion INT,
+    p_nombre VARCHAR(200),
+    p_descripcion TEXT,
+    p_fecha_inicio DATE,
+    p_fecha_fin DATE,
+    p_id_tipo_eleccion INT
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE Elecciones
+    SET nombre = p_nombre,
+        descripcion = p_descripcion,
+        fecha_inicio = p_fecha_inicio,
+        fecha_fin = p_fecha_fin,
+        id_tipo_eleccion = p_id_tipo_eleccion
+    WHERE id_eleccion = p_id_eleccion;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Elección con ID % no encontrada.', p_id_eleccion;
+    ELSE
+        RAISE NOTICE 'Elección con ID % actualizada exitosamente.', p_id_eleccion;
+    END IF;
+END;
+$$;
+
+-- Procedimiento: EliminarEleccion
+-- Elimina un registro de elección
+CREATE OR REPLACE PROCEDURE EliminarEleccion(p_id_eleccion INT)
+LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM Elecciones WHERE id_eleccion = p_id_eleccion;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Elección con ID % no encontrada.', p_id_eleccion;
+    ELSE
+        RAISE NOTICE 'Elección con ID % eliminada exitosamente.', p_id_eleccion;
+    END IF;
+END;
+$$;
+
+-- Procedimiento: RegistrarVoto
+-- Procedimiento seguro para registrar un voto, validando la habilitación del votante
+-- y anonimizando el voto.
+CREATE OR REPLACE PROCEDURE RegistrarVoto(
+    votante_dni VARCHAR(15),
+    eleccion_id INT,
+    candidato_id INT,
+    mesa_id INT,
+    usuario_log_id INT -- ID del usuario que registra el voto (oficial de mesa)
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_votante_id INT;
+BEGIN
+    -- Obtener el ID del votante basado en el DNI
+    SELECT id_votante INTO v_votante_id FROM Votantes WHERE dni = votante_dni;
+
+    IF v_votante_id IS NULL THEN
+        RAISE EXCEPTION 'Votante con DNI % no encontrado.', votante_dni;
+    END IF;
+
+    -- Verificar habilitación del votante
+    IF NOT VerificarHabilitacion(v_votante_id, eleccion_id) THEN
+        RAISE EXCEPTION 'Votante no habilitado para votar en esta elección o ya ha votado.';
+    END IF;
+
+    -- Insertar el voto anonimizado en VotosEmitidos
+    INSERT INTO VotosEmitidos(id_eleccion, id_candidato, id_mesa)
+    VALUES (eleccion_id, candidato_id, mesa_id);
+
+    -- Marcar al votante como NO habilitado en el padrón electoral (ha votado)
+    UPDATE PadronElectoral SET habilitado = FALSE
+    WHERE id_votante = v_votante_id AND id_eleccion = eleccion_id;
+
+    -- Registrar la acción de voto exitoso en el log del sistema
+    INSERT INTO LogsSistema(id_usuario, accion, detalle)
+    VALUES (usuario_log_id, 'REGISTRO_VOTO_EXITOSO',
+            'Voto registrado por DNI ' || votante_dni || ' (ID:' || v_votante_id || ') en mesa ' || mesa_id || ' para candidato ' || candidato_id || '.');
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Registrar la acción de voto fallido en el log del sistema
+        INSERT INTO LogsSistema(id_usuario, accion, detalle)
+        VALUES (usuario_log_id, 'REGISTRO_VOTO_FALLIDO',
+                'Error al registrar voto para DNI ' || votante_dni || ' en mesa ' || mesa_id || ': ' || SQLERRM);
+        RAISE; -- Re-lanza la excepción original
+END;
+$$;
+
+
+-- Función de Trigger: LogPadronChange
+-- Registra en LogsSistema cualquier INSERT, UPDATE o DELETE en la tabla PadronElectoral.
+-- Se usa current_setting('app.user', TRUE) para obtener el usuario que realizó la acción.
+CREATE OR REPLACE FUNCTION LogPadronChange() RETURNS TRIGGER AS $$
+DECLARE
+    current_user_id INT;
+BEGIN
+    -- Intentar obtener el ID del usuario de la configuración de la sesión
+    BEGIN
+        current_user_id := COALESCE(NULLIF(current_setting('app.user', TRUE), ''), '0')::INT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            current_user_id := 0; -- Valor por defecto si no se puede obtener (ej. proceso automático)
+    END;
+
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO LogsSistema(id_usuario, accion, detalle)
+        VALUES (current_user_id, 'INSERT_PADRON_ELECTORAL', 'Nuevo registro en PadronElectoral: ' || row_to_json(NEW)::TEXT);
+    ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO LogsSistema(id_usuario, accion, detalle)
+        VALUES (current_user_id, 'UPDATE_PADRON_ELECTORAL', 'Actualización en PadronElectoral. Antes: ' || row_to_json(OLD)::TEXT || ', Después: ' || row_to_json(NEW)::TEXT);
+    ELSIF TG_OP = 'DELETE' THEN
+        INSERT INTO LogsSistema(id_usuario, accion, detalle)
+        VALUES (current_user_id, 'DELETE_PADRON_ELECTORAL', 'Eliminación en PadronElectoral: ' || row_to_json(OLD)::TEXT);
+    END IF;
+    RETURN NEW;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE WARNING 'Error en LogPadronChange: %', SQLERRM;
+        RETURN NEW; -- No impedir la operación original si el log falla
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger: tr_log_padron_change
+-- Se dispara después de INSERT, UPDATE o DELETE en PadronElectoral
+DROP TRIGGER IF EXISTS tr_log_padron_change ON PadronElectoral;
+CREATE TRIGGER tr_log_padron_change
+AFTER INSERT OR UPDATE OR DELETE ON PadronElectoral
+FOR EACH ROW EXECUTE FUNCTION LogPadronChange();
+
+
+-- Función de Trigger: LogVotoEmitido
+-- Registra en LogsSistema cada vez que se inserta un nuevo voto.
+CREATE OR REPLACE FUNCTION LogVotoEmitido() RETURNS TRIGGER AS $$
+DECLARE
+    current_user_id INT;
+BEGIN
+    BEGIN
+        current_user_id := COALESCE(NULLIF(current_setting('app.user', TRUE), ''), '0')::INT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            current_user_id := 0;
+    END;
+
+    INSERT INTO LogsSistema(id_usuario, accion, detalle)
+    VALUES (current_user_id, 'REGISTRO_VOTO',
+            'Voto emitido - Elección ID: ' || NEW.id_eleccion ||
+            ', Candidato ID: ' || NEW.id_candidato ||
+            ', Mesa ID: ' || NEW.id_mesa ||
+            ', ID Voto: ' || NEW.id_voto);
+    RETURN NEW;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE WARNING 'Error en LogVotoEmitido: %', SQLERRM;
+        RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger: tr_log_voto
+-- Se dispara después de insertar un voto en VotosEmitidos
+DROP TRIGGER IF EXISTS tr_log_voto ON VotosEmitidos;
+CREATE TRIGGER tr_log_voto
+AFTER INSERT ON VotosEmitidos
+FOR EACH ROW EXECUTE FUNCTION LogVotoEmitido();
+
+
+-- Función de Trigger: ActualizarResultadosDespuesVoto
+-- Actualiza los resultados en ResultadosMesa, ResultadosCentro y ResultadosGenerales
+-- automáticamente después de cada voto emitido.
+CREATE OR REPLACE FUNCTION ActualizarResultadosDespuesVoto() RETURNS TRIGGER AS $$
+DECLARE
+    v_id_centro INT;
+BEGIN
+    -- Actualizar o insertar en ResultadosMesa
+    INSERT INTO ResultadosMesa(id_mesa, id_candidato, votos)
+    VALUES (NEW.id_mesa, NEW.id_candidato, 1)
+    ON CONFLICT (id_mesa, id_candidato) DO UPDATE
+    SET votos = ResultadosMesa.votos + 1;
+
+    -- Obtener el ID del centro de votación de la mesa del voto
+    SELECT id_centro INTO v_id_centro
+    FROM MesasElectorales
+    WHERE id_mesa = NEW.id_mesa;
+
+    -- Actualizar o insertar en ResultadosCentro
+    INSERT INTO ResultadosCentro(id_centro, id_candidato, votos)
+    VALUES (v_id_centro, NEW.id_candidato, 1)
+    ON CONFLICT (id_centro, id_candidato) DO UPDATE
+    SET votos = ResultadosCentro.votos + 1;
+
+    -- Actualizar o insertar en ResultadosGenerales
+    INSERT INTO ResultadosGenerales(id_eleccion, id_candidato, votos)
+    VALUES (NEW.id_eleccion, NEW.id_candidato, 1)
+    ON CONFLICT (id_eleccion, id_candidato) DO UPDATE
+    SET votos = ResultadosGenerales.votos + 1;
+
+    RETURN NEW;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE WARNING 'Error en ActualizarResultadosDespuesVoto: %', SQLERRM;
+        RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger: tr_actualizar_resultados
+-- Se dispara después de insertar un voto en VotosEmitidos para actualizar los contadores
+DROP TRIGGER IF EXISTS tr_actualizar_resultados ON VotosEmitidos;
+CREATE TRIGGER tr_actualizar_resultados
+AFTER INSERT ON VotosEmitidos
+FOR EACH ROW
+EXECUTE FUNCTION ActualizarResultadosDespuesVoto();
+
+
+-- 1. INNER JOIN: Candidatos de la elección presidencial con su partido y tipo de elección
+SELECT
+    c.nombre_completo AS "Candidato",
+    pp.nombre AS "Partido Político",
+    te.nombre AS "Tipo de Elección",
+    e.nombre AS "Nombre Elección"
+FROM Candidatos c
+INNER JOIN PartidosPoliticos pp ON c.id_partido = pp.id_partido
+INNER JOIN Elecciones e ON c.id_eleccion = e.id_eleccion
+INNER JOIN TiposEleccion te ON e.id_tipo_eleccion = te.id_tipo_eleccion
+WHERE e.nombre = 'Elección Presidencial 2025';
+
+-- 2. LEFT JOIN: Centros de votación y sus mesas, incluyendo centros sin mesas asignadas
+SELECT
+    cv.nombre AS "Centro de Votación",
+    cv.direccion AS "Dirección del Centro",
+    me.numero_mesa AS "Número de Mesa"
+FROM CentrosVotacion cv
+LEFT JOIN MesasElectorales me ON cv.id_centro = me.id_centro
+ORDER BY cv.nombre, me.numero_mesa;
+
+-- 3. RIGHT JOIN: Tipos de elección y las elecciones asociadas, incluyendo tipos sin elecciones registradas
+SELECT
+    te.nombre AS "Tipo de Elección",
+    e.nombre AS "Nombre de Elección",
+    e.fecha_inicio AS "Fecha de Inicio"
+FROM TiposEleccion te
+RIGHT JOIN Elecciones e ON te.id_tipo_eleccion = e.id_tipo_eleccion
+ORDER BY te.nombre, e.nombre;
+
+-- 4. Subconsulta: Votantes que NO están habilitados para la 'Elección Presidencial 2025'
+SELECT
+    v.nombre_completo AS "Votante No Habilitado",
+    v.dni AS "DNI"
+FROM Votantes v
+WHERE v.id_votante IN (
+    SELECT pe.id_votante
+    FROM PadronElectoral pe
+    JOIN Elecciones el ON pe.id_eleccion = el.id_eleccion
+    WHERE el.nombre = 'Elección Presidencial 2025' AND pe.habilitado = FALSE
+)
+ORDER BY v.nombre_completo;
+
+-- 5. Subconsulta: Partidos políticos que tienen candidatos en la 'Elección Parlamentaria 2025'
+SELECT
+    pp.nombre AS "Partido con Candidatos",
+    pp.siglas AS "Siglas"
+FROM PartidosPoliticos pp
+WHERE pp.id_partido IN (
+    SELECT DISTINCT c.id_partido
+    FROM Candidatos c
+    JOIN Elecciones e ON c.id_eleccion = e.id_eleccion
+    WHERE e.nombre = 'Elección Parlamentaria 2025'
+)
+ORDER BY pp.nombre;
+
+
+-- CTE 1: Calcular resultados agregados por partido a nivel general para la Elección Presidencial 2025
+WITH VotosPorPartidoPresidencial AS (
+    SELECT
+        pp.nombre AS partido_nombre,
+        SUM(rg.votos) AS votos_totales_partido
+    FROM ResultadosGenerales rg
+    JOIN Candidatos c ON rg.id_candidato = c.id_candidato
+    JOIN PartidosPoliticos pp ON c.id_partido = pp.id_partido
+    JOIN Elecciones e ON rg.id_eleccion = e.id_eleccion
+    WHERE e.nombre = 'Elección Presidencial 2025'
+    GROUP BY pp.nombre
+)
+SELECT
+    vpp.partido_nombre,
+    vpp.votos_totales_partido
+FROM VotosPorPartidoPresidencial vpp
+ORDER BY vpp.votos_totales_partido DESC;
+
+-- CTE 2: Obtener el candidato (o candidatos en caso de empate) ganador por cada centro de votación
+WITH VotosPorCandidatoCentroRanked AS (
+    SELECT
+        cv.nombre AS centro_votacion_nombre,
+        ca.nombre_completo AS candidato_nombre,
+        SUM(rc.votos) AS total_votos_centro,
+        RANK() OVER (PARTITION BY cv.nombre ORDER BY SUM(rc.votos) DESC) as rank_candidato
+    FROM ResultadosCentro rc
+    JOIN CentrosVotacion cv ON rc.id_centro = cv.id_centro
+    JOIN Candidatos ca ON rc.id_candidato = ca.id_candidato
+    GROUP BY cv.nombre, ca.nombre_completo
+)
+SELECT
+    vc.centro_votacion_nombre,
+    vc.candidato_nombre,
+    vc.total_votos_centro
+FROM VotosPorCandidatoCentroRanked vc
+WHERE vc.rank_candidato = 1
+ORDER BY vc.centro_votacion_nombre;
+
+
+-- Creación de Roles (ya definidos en el código original, se incluyen para completitud)
+CREATE ROLE admin_rol WITH NOLOGIN; -- Rol para administración general
+CREATE ROLE oficial_rol WITH NOLOGIN; -- Rol para oficiales de mesa
+CREATE ROLE auditor_rol WITH NOLOGIN; -- Rol para auditores
+CREATE ROLE observador_rol WITH NOLOGIN; -- Rol para observadores
+
+-- Crear usuarios y asignar roles (las contraseñas se gestionan via pgcrypto al insertar en UsuariosSistema)
+-- La asignación de roles a usuarios_sistema se hace via la aplicación
+-- GRANT admin_rol TO admin1; (Ejemplo de cómo se haría si los usuarios fueran directos de BD)
+-- GRANT oficial_rol TO oficial1;
+-- GRANT auditor_rol TO auditor1;
+-- GRANT observador_rol TO observador1;
+
+-- Revocar todos los permisos del público por defecto para mayor seguridad
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL PROCEDURES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL VIEWS IN SCHEMA public FROM PUBLIC;
+
+
+-- Permisos para el rol 'admin_rol' (Administrador Electoral)
+GRANT ALL PRIVILEGES ON DATABASE votacion TO admin_rol;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO admin_rol;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO admin_rol;
+GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO admin_rol;
+GRANT ALL PRIVILEGES ON ALL PROCEDURES IN SCHEMA public TO admin_rol;
+GRANT ALL PRIVILEGES ON ALL VIEWS IN SCHEMA public TO admin_rol;
+
+-- Permisos para el rol 'oficial_rol' (Oficial de Mesa)
+GRANT CONNECT ON DATABASE votacion TO oficial_rol;
+
+-- SELECT básico para operar:
+GRANT SELECT ON
+    TiposEleccion,
+    Elecciones,
+    Candidatos,
+    PartidosPoliticos,
+    Votantes,           -- Para buscar votantes por DNI
+    PadronElectoral,    -- Para verificar habilitación
+    CentrosVotacion,
+    MesasElectorales
+TO oficial_rol;
+
+-- Permisos para ejecutar el SP de registro de voto
+GRANT EXECUTE ON PROCEDURE RegistrarVoto(VARCHAR, INT, INT, INT, INT) TO oficial_rol;
+
+-- Permisos para tablas que son afectadas por RegistrarVoto o sus triggers:
+GRANT UPDATE ON PadronElectoral TO oficial_rol;
+GRANT INSERT ON VotosEmitidos TO oficial_rol;
+GRANT UPDATE ON ResultadosMesa TO oficial_rol;
+GRANT SELECT, INSERT, UPDATE ON ResultadosCentro TO oficial_rol;
+GRANT SELECT, INSERT, UPDATE ON ResultadosGenerales TO oficial_rol;
+GRANT INSERT ON LogsSistema TO oficial_rol;
+
+-- Permisos de uso en secuencias para las tablas que inserta o actualiza
+GRANT USAGE ON SEQUENCE votosemitidos_id_voto_seq TO oficial_rol;
+GRANT USAGE ON SEQUENCE padronelectoral_id_padron_seq TO oficial_rol;
+GRANT USAGE ON SEQUENCE resultadosmesa_id_resultado_mesa_seq TO oficial_rol;
+GRANT USAGE ON SEQUENCE resultadoscentro_id_resultado_centro_seq TO oficial_rol;
+GRANT USAGE ON SEQUENCE resultadosgenerales_id_resultado_general_seq TO oficial_rol;
+GRANT USAGE ON SEQUENCE logssistema_id_log_seq TO oficial_rol;
+
+
+-- Permisos para el rol 'auditor_rol'
+GRANT CONNECT ON DATABASE votacion TO auditor_rol;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO auditor_rol;
+GRANT SELECT ON ALL VIEWS IN SCHEMA public TO auditor_rol;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO auditor_rol; -- Permite ejecutar todas las funciones para auditoría
+-- NOTA: Si hay funciones que NO DEBEN ser ejecutadas por auditores, se deben revocar explícitamente.
+
+
+-- Permisos para el rol 'observador_rol' (Solo lectura de resultados y configuración)
+GRANT CONNECT ON DATABASE votacion TO observador_rol;
+GRANT SELECT ON
+    TiposEleccion,
+    Elecciones,
+    PartidosPoliticos,
+    Candidatos,
+    CentrosVotacion,
+    MesasElectorales,
+    ResultadosMesa,
+    ResultadosCentro,
+    ResultadosGenerales
+TO observador_rol;
+GRANT SELECT ON ALL VIEWS IN SCHEMA public TO observador_rol;
